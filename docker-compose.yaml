@@ -1,0 +1,5 @@
+services:
+  plannerday-agent:
+    build: .
+    env_file:
+      - .env
