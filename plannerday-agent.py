@@ -23,53 +23,55 @@ logfire.instrument_pydantic_ai()
 class Deps:
     client: AsyncClient
     weather_api_key: str | None
-    geo_api_key: str | None
 
 
-weather_agent = Agent(
+planner_agent = Agent(
     'openai:gpt-4o',
     # 'Be concise, reply with one sentence.' is enough for some models (like openai) to use
     # the below tools appropriately, but others like anthropic and gemini require a bit more direction.
     instructions=(
-        'Be concise, reply with one sentence.'
-        'Use the `get_lat_lng` tool to get the latitude and longitude of the locations, '
-        'then use the `get_weather` tool to get the weather.'
+        'Ви розумний асистент з планування дня, який дає рекомендації на основі погодних умов. '
+        'Будьте лаконічними, відповідайте одним-двома реченнями. '
+        'Використовуйте `get_user_location_by_ip` для отримання координат локації, '
+        'потім `get_weather` для отримання погоди, '
+        'і на основі цієї інформації рекомендуйте оптимальні активності для дня. '
+        'Якщо погода гарна, пропонуйте більше заходів на відкритому повітрі. '
+        'При поганій погоді, пропонуйте активності в приміщенні. '
+        'Враховуйте температуру та опади при плануванні фізичних активностей. '
     ),
     deps_type=Deps,
     retries=2,
 )
 
+@planner_agent.tool
+async def get_user_location_by_ip(ctx: RunContext[Deps]) -> dict[str, Any]:
+    """Get user's location based on their IP address."""
+    try:
+        # Використання безкоштовного API для визначення місцезнаходження за IP
+        r = await ctx.deps.client.get('https://ipapi.co/json/')
+        r.raise_for_status()
+        data = r.json()
+        print(data)
 
-@weather_agent.tool
-async def get_lat_lng(
-    ctx: RunContext[Deps], location_description: str
-) -> dict[str, float]:
-    """Get the latitude and longitude of a location.
+        return {
+            'city': data.get('city', 'Unknown'),
+            'region': data.get('region', 'Unknown'),
+            'country': data.get('country_name', 'Unknown'),
+            'lat': data.get('latitude', 0.0),
+            'lng': data.get('longitude', 0.0)
+        }
+    except Exception as e:
+        # Якщо виникла помилка, повертаємо значення за замовчуванням (наприклад, Київ)
+        logfire.warning(f"Failed to get location by IP: {str(e)}")
+        return {
+            'city': 'Київ',
+            'region': 'Київська область',
+            'country': 'Україна',
+            'lat': 50.4501,
+            'lng': 30.5234
+        }
 
-    Args:
-        ctx: The context.
-        location_description: A description of a location.
-    """
-    if ctx.deps.geo_api_key is None:
-        # if no API key is provided, return a dummy response (London)
-        return {'lat': 51.1, 'lng': -0.1}
-
-    params = {'access_token': ctx.deps.geo_api_key}
-    loc = urllib.parse.quote(location_description)
-    r = await ctx.deps.client.get(
-        f'https://api.mapbox.com/geocoding/v5/mapbox.places/{loc}.json', params=params
-    )
-    r.raise_for_status()
-    data = r.json()
-
-    if features := data['features']:
-        lat, lng = features[0]['center']
-        return {'lat': lat, 'lng': lng}
-    else:
-        raise ModelRetry('Could not find the location')
-
-
-@weather_agent.tool
+@planner_agent.tool
 async def get_weather(ctx: RunContext[Deps], lat: float, lng: float) -> dict[str, Any]:
     """Get the weather at a location.
 
@@ -133,13 +135,11 @@ async def main():
         logfire.instrument_httpx(client, capture_all=True)
         # create a free API key at https://www.tomorrow.io/weather-api/
         weather_api_key = os.getenv('WEATHER_API_KEY')
-        # create a free API key at https://www.mapbox.com/
-        geo_api_key = os.getenv('GEO_API_KEY')
         deps = Deps(
-            client=client, weather_api_key=weather_api_key, geo_api_key=geo_api_key
+            client=client, weather_api_key=weather_api_key
         )
-        result = await weather_agent.run(
-            'What is the weather like in London and in Wiltshire?', deps=deps
+        result = await planner_agent.run(
+            'Допоможи мені спланувати день згідно мого місцезнаходження', deps=deps
         )
         debug(result)
         print('Response:', result.output)
